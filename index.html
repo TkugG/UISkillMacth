@@ -274,9 +274,17 @@
   <!-- ======================================================== -->
   <!-- 3. JOB DETAIL POPUP MODAL -->
   <!-- ======================================================== -->
-  <div id="jobDetailModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 modal-backdrop">
+  <div id="jobDetailModal" onclick="window.App.closeJobModal()"
+    class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 modal-backdrop">
     <div onclick="event.stopPropagation()"
-      class="bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-200">
+      class="relative bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-200">
+      
+      <!-- Top-Right Close (X) Button -->
+      <button onclick="window.App.closeJobModal()" aria-label="Close modal"
+        class="absolute top-5 right-5 text-slate-400 hover:text-slate-700 w-8 h-8 rounded-full flex items-center justify-center hover:bg-slate-100 transition z-10 cursor-pointer">
+        <i class="fa-solid fa-xmark text-lg"></i>
+      </button>
+
       <div id="jobModalContent">
         <!-- Rendered dynamically by app.js -->
       </div>

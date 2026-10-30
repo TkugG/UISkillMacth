@@ -9,7 +9,6 @@
   function normalizeSkill(raw) {
     if (!raw) return "";
     let s = raw.trim().toLowerCase();
-    // remove quotes, brackets
     s = s.replace(/^[\["'`]+|[\]"'`]+$/g, "").trim();
     if (data.synonyms && data.synonyms[s]) {
       return data.synonyms[s];
@@ -23,7 +22,7 @@
     return Array.from(new Set(normalized));
   }
 
-  // 2. Client-side Career Predictor (Stage 1 ML Simulation / Voting)
+  // 2. Client-side Career Predictor (Stage 1 ML Simulation / Weighted Voting)
   function predictCareerRole(userSkills) {
     if (!userSkills || userSkills.length === 0) return null;
     const normSkills = new Set(userSkills.map(normalizeSkill));
@@ -39,15 +38,13 @@
         jobSkillMatches: 0,
       };
 
-      // Check core skills
       for (const core of roleInfo.core_skills || []) {
         if (normSkills.has(normalizeSkill(core))) {
-          scores[roleId].matchedCoreCount += 2.0; // Higher weight for core skills
+          scores[roleId].matchedCoreCount += 2.0;
         }
       }
     }
 
-    // Check job skills in dataset
     for (const job of data.jobs) {
       const roleId = job.CurriculumRoleID;
       if (!scores[roleId]) continue;
@@ -59,7 +56,6 @@
       }
     }
 
-    // Rank roles
     const ranked = Object.values(scores).map((item) => {
       const totalScore = item.matchedCoreCount * 3 + item.jobSkillMatches;
       return {
@@ -82,6 +78,7 @@
   }
 
   // 3. Stage 2 Matching: Skill Match Percentage = |S_user ∩ S_job| / |S_job| * 100
+  // With secondary sorting on matched.length (Tie-Breaker)
   function matchJobs(userSkills, targetRole = "") {
     const normUser = new Set(normalizeSkillsList(userSkills));
     if (normUser.size === 0) return [];
@@ -128,12 +125,19 @@
       });
     }
 
-    // Sort descending by matchPercentage
-    results.sort((a, b) => b.matchPercentage - a.matchPercentage);
+    // Sort descending by matchPercentage, then by number of matched skills (Tie-breaker)
+    results.sort((a, b) => {
+      if (b.matchPercentage !== a.matchPercentage) {
+        return b.matchPercentage - a.matchPercentage;
+      }
+      return b.matchedSkills.length - a.matchedSkills.length;
+    });
+
     return results;
   }
 
   // 4. Career Readiness Calculation: |S_user ∩ S_core| / |S_core| * 100
+  // Classified into 3 TQF:HEd Levels: Advanced (>=80%), Job-Ready (>=50%), Developing (<50%)
   function calculateReadiness(userSkills) {
     const normUser = new Set(normalizeSkillsList(userSkills));
     const readiness = {};
@@ -141,12 +145,16 @@
     for (const [roleId, roleInfo] of Object.entries(data.curriculumRoles)) {
       const core = (roleInfo.core_skills || []).map(normalizeSkill);
       if (core.length === 0) {
-        readiness[roleId] = { percent: 0, matched: 0, total: 0 };
+        readiness[roleId] = { percent: 0, matched: 0, total: 0, level: "Developing" };
         continue;
       }
 
       const matchedCount = core.filter((c) => normUser.has(c)).length;
       const pct = Math.round((matchedCount / core.length) * 100);
+
+      let level = "Developing (ระดับเริ่มต้น)";
+      if (pct >= 80) level = "Advanced (ระดับเชี่ยวชาญ)";
+      else if (pct >= 50) level = "Job-Ready (ระดับพร้อมทำงาน)";
 
       readiness[roleId] = {
         roleId,
@@ -155,13 +163,14 @@
         percent: pct,
         matched: matchedCount,
         total: core.length,
+        level,
       };
     }
 
     return readiness;
   }
 
-  // 5. Unified Service: Try FastAPI Backend First, Fallback to Client Engine
+  // 5. Unified Service: Supports FastAPI Data Contract + Seamless Client Fallback
   async function recommend(userSkills, targetRole = "") {
     const normSkills = normalizeSkillsList(userSkills);
     if (normSkills.length === 0) {
@@ -178,12 +187,14 @@
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1800);
 
+      // Support FastAPI Request Schema: preference / target_career
       const res = await fetch("http://127.0.0.1:8000/recommend", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           skills: normSkills,
-          target_role: targetRole && targetRole !== "ALL" ? targetRole : null,
+          preference: targetRole && targetRole !== "ALL" ? targetRole : "",
+          target_career: targetRole && targetRole !== "ALL" ? targetRole : "",
         }),
         signal: controller.signal,
       });
@@ -192,14 +203,24 @@
 
       if (res.ok) {
         const json = await res.json();
-        return {
-          prediction: {
-            predictedRoleId: json.predicted_role_id || json.predicted_curriculum_role_id,
-            predictedTitle: json.predicted_role_title || json.predicted_role,
-            predictedEnTitle: json.predicted_role_en || "",
-            confidenceScore: Math.round((json.confidence_score || 0.8) * 100),
-          },
-          jobs: (json.recommendations || json.recommended_jobs || []).map((j) => ({
+        const analysis = json.target_career_analysis || {};
+        const predRoleId = analysis.predicted_role_id || json.predicted_role_id || "G1";
+        const roleMeta = data.curriculumRoles[predRoleId] || {};
+
+        const rawJobs =
+          json.skill_matched_recommendations ||
+          json.recommended_jobs ||
+          json.recommendations ||
+          json.results ||
+          [];
+
+        const mappedJobs = rawJobs.map((j) => {
+          const matched = j.matched_skills || [];
+          const missing = j.missing_skills || [];
+          const allSkills = j.skills || j.job_skills || [...matched, ...missing];
+          const score = j.score ?? j.match_percentage ?? j.match_score ?? 0;
+
+          return {
             jobId: j.job_id || j.JobID,
             title: j.title || j.Title,
             company: j.company || j.Company,
@@ -209,12 +230,24 @@
             curriculumRoleId: j.curriculum_role_id || j.CurriculumRoleID,
             curriculumRoleTitle: j.curriculum_role_title || j.CurriculumRoleTitle,
             curriculumRoleEN: j.curriculum_role_en || j.CurriculumRoleEN,
-            skills: j.skills || [],
-            matchedSkills: j.matched_skills || [],
-            missingSkills: j.missing_skills || [],
-            matchPercentage: Math.round(j.match_percentage || j.match_score || 0),
+            skills: allSkills,
+            matchedSkills: matched,
+            missingSkills: missing,
+            matchPercentage: Math.round(score),
             applyUrl: j.apply_url || j.ApplyURL,
-          })),
+          };
+        });
+
+        return {
+          prediction: {
+            predictedRoleId: predRoleId,
+            predictedTitle: analysis.target_role_title || roleMeta.title || predRoleId,
+            predictedEnTitle: analysis.target_role_en || roleMeta.en_title || "",
+            confidenceScore: Math.round(
+              analysis.predicted_confidence ?? (json.confidence_score ? json.confidence_score * 100 : 80)
+            ),
+          },
+          jobs: mappedJobs.length > 0 ? mappedJobs : matchJobs(normSkills, targetRole),
           readiness: calculateReadiness(normSkills),
           source: "fastapi",
         };
@@ -223,7 +256,7 @@
       // Backend offline or timeout -> Seamless fallback to Client Engine
     }
 
-    // Client-side execution
+    // Client-side execution (Offline Fallback)
     const pred = predictCareerRole(normSkills);
     const jobs = matchJobs(normSkills, targetRole);
     const readiness = calculateReadiness(normSkills);
